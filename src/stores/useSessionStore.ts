@@ -693,6 +693,31 @@ export function useSessionStore() {
     }
   }, [notify]);
 
+  const replaceServerMessages = useCallback((
+    sessionId: string,
+    messages: NormalizedMessage[],
+    meta: {
+      total?: number;
+      hasMore?: boolean;
+      offset?: number;
+      tokenUsage?: unknown;
+    } = {},
+  ) => {
+    const slot = getSlot(sessionId);
+    slot.serverMessages = messages;
+    slot.realtimeMessages = [];
+    slot.total = meta.total ?? messages.length;
+    slot.hasMore = Boolean(meta.hasMore);
+    slot.offset = meta.offset ?? messages.length;
+    slot.fetchedAt = Date.now();
+    slot.status = 'idle';
+    if (meta.tokenUsage !== undefined) {
+      slot.tokenUsage = meta.tokenUsage;
+    }
+    recomputeMergedIfNeeded(slot);
+    notify(sessionId);
+  }, [getSlot, notify]);
+
   /**
    * Get merged messages for a session (for rendering).
    */
@@ -721,13 +746,14 @@ export function useSessionStore() {
     updateStreaming,
     finalizeStreaming,
     clearRealtime,
+    replaceServerMessages,
     getMessages,
     getSessionSlot,
   }), [
     getSlot, has, fetchFromServer, fetchMore,
     appendRealtime, appendRealtimeBatch, refreshFromServer,
     setActiveSession, setStatus, isStale, updateStreaming, finalizeStreaming,
-    clearRealtime, getMessages, getSessionSlot,
+    clearRealtime, replaceServerMessages, getMessages, getSessionSlot,
   ]);
 }
 

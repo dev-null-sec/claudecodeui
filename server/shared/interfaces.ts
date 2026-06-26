@@ -13,6 +13,8 @@ import type {
   ProviderMcpServer,
   ProviderSessionActiveModelChange,
   ProviderSkillCreateInput,
+  RewindHistoryOptions,
+  RewindSessionResult,
   UpsertProviderMcpServerInput,
 } from '@/shared/types.js';
 
@@ -141,6 +143,7 @@ export interface IProviderMcp {
 export interface IProviderSessions {
   normalizeMessage(raw: unknown, sessionId: string | null): NormalizedMessage[];
   fetchHistory(sessionId: string, options?: FetchHistoryOptions): Promise<FetchHistoryResult>;
+  rewindHistory?(sessionId: string, options: RewindHistoryOptions): Promise<RewindSessionResult>;
 }
 
 // ---------------------------

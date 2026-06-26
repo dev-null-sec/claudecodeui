@@ -11,6 +11,9 @@
     "copyAsMarkdown": "复制为 Markdown",
     "copyAsText": "复制为纯文本"
   },
+  "rewind": {
+    "toHere": "回溯对话到这里"
+  },
   "messageTypes": {
     "user": "U",
     "error": "错误",
@@ -109,6 +112,8 @@
     "disabled": "输入已禁用",
     "attachFiles": "附加文件",
     "attachImages": "附加图片",
+    "insertImagePath": "插入图片路径",
+    "dropImagesForPaths": "拖放图片以插入路径",
     "send": "发送",
     "stop": "停止",
     "hintText": {

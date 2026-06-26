@@ -220,6 +220,15 @@ export const sessionsDb = {
     ).run(customName, sessionId);
   },
 
+  touchSession(sessionId: string): void {
+    const db = getConnection();
+    db.prepare(
+      `UPDATE sessions
+       SET updated_at = CURRENT_TIMESTAMP
+       WHERE session_id = ?`
+    ).run(sessionId);
+  },
+
   getSessionById(sessionId: string): SessionRow | null {
     const db = getConnection();
     const row = db

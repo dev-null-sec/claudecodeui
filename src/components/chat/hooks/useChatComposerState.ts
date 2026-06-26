@@ -17,6 +17,7 @@ import { grantClaudeToolPermission } from '../utils/chatPermissions';
 import { safeLocalStorage } from '../utils/chatStorage';
 import type {
   ChatMessage,
+  ImagePathAttachment,
   PendingPermissionRequest,
   PermissionMode,
   SessionEstablishedContext,
@@ -66,6 +67,11 @@ interface MentionableFile {
   name: string;
   path: string;
 }
+
+type FileWithPath = File & {
+  path?: string;
+  webkitRelativePath?: string;
+};
 
 interface CommandExecutionResult {
   type: 'builtin' | 'custom';
@@ -143,6 +149,97 @@ const createFakeSubmitEvent = () => {
   return { preventDefault: () => undefined } as unknown as FormEvent<HTMLFormElement>;
 };
 
+interface SavedImagePathAttachment {
+  name?: unknown;
+  path?: unknown;
+  size?: unknown;
+  mimeType?: unknown;
+}
+
+interface SaveImagePathAttachmentsResponse {
+  attachments?: SavedImagePathAttachment[];
+  error?: string;
+  message?: string;
+}
+
+const IMAGE_PATH_SAVE_FAILED_MESSAGE =
+  '无法把图片保存为本机路径。请用图片按钮选择文件，或直接把图片完整路径粘贴到输入框。';
+
+const isImageFile = (file: File): boolean => {
+  if (file.type?.startsWith('image/')) {
+    return true;
+  }
+
+  return /\.(png|jpe?g|gif|webp|svg|bmp|tiff?)$/i.test(file.name || '');
+};
+
+const isAbsolutePathLike = (value: string): boolean => {
+  return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\') || value.startsWith('/');
+};
+
+const readLocalImagePath = (file: File): string | null => {
+  const fileWithPath = file as FileWithPath;
+  const candidates = [
+    fileWithPath.path,
+    fileWithPath.webkitRelativePath,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') {
+      continue;
+    }
+
+    const normalized = candidate.trim();
+    if (normalized && isAbsolutePathLike(normalized)) {
+      return normalized;
+    }
+  }
+
+  return null;
+};
+
+const createImageAttachmentId = (): string => {
+  return `image-path-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+};
+
+const getPathFileName = (filePath: string): string => {
+  const normalized = filePath.trim();
+  const parts = normalized.split(/[\\/]/);
+  return parts[parts.length - 1] || normalized || 'image';
+};
+
+const createImagePathAttachment = (path: string, file?: File): ImagePathAttachment | null => {
+  const normalizedPath = path.trim();
+  if (!normalizedPath) {
+    return null;
+  }
+
+  return {
+    id: createImageAttachmentId(),
+    name: file?.name || getPathFileName(normalizedPath),
+    path: normalizedPath,
+    file,
+  };
+};
+
+const buildMessageContentWithImagePaths = (
+  text: string,
+  attachments: ImagePathAttachment[],
+): string => {
+  const paths = Array.from(new Set(
+    attachments
+      .map((attachment) => attachment.path.trim())
+      .filter(Boolean),
+  ));
+
+  if (paths.length === 0) {
+    return text;
+  }
+
+  const trimmedText = text.trimEnd();
+  return trimmedText ? `${trimmedText}\n${paths.join('\n')}` : paths.join('\n');
+};
+
 const getNotificationSessionSummary = (
   selectedSession: ProjectSession | null,
   fallbackInput: string,
@@ -196,9 +293,10 @@ export function useChatComposerState({
     }
     return '';
   });
-  const [attachedImages, setAttachedImages] = useState<File[]>([]);
+  const [attachedImages, setAttachedImages] = useState<ImagePathAttachment[]>([]);
   const [uploadingImages, setUploadingImages] = useState<Map<string, number>>(new Map());
   const [imageErrors, setImageErrors] = useState<Map<string, string>>(new Map());
+  const [imagePathError, setImagePathError] = useState<string | null>(null);
   const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
   const [commandModalPayload, setCommandModalPayload] = useState<CommandModalPayload | null>(null);
 
@@ -457,72 +555,187 @@ export function useChatComposerState({
     inputHighlightRef.current.scrollLeft = target.scrollLeft;
   }, []);
 
-  const handleImageFiles = useCallback((files: File[]) => {
-    const validFiles = files.filter((file) => {
+  const appendImageAttachments = useCallback((attachments: ImagePathAttachment[]) => {
+    const validAttachments = attachments.filter((attachment) => attachment.path.trim());
+    if (validAttachments.length === 0) {
+      return;
+    }
+
+    setAttachedImages((previous) => {
+      const seenPaths = new Set(previous.map((attachment) => attachment.path));
+      const next = [...previous];
+
+      validAttachments.forEach((attachment) => {
+        if (seenPaths.has(attachment.path)) {
+          return;
+        }
+
+        seenPaths.add(attachment.path);
+        next.push(attachment);
+      });
+
+      return next;
+    });
+    setImagePathError(null);
+  }, []);
+
+  const saveImageFilesAsPathAttachments = useCallback(async (files: File[]) => {
+    const formData = new FormData();
+    files.forEach((file) => {
+      formData.append('images', file, file.name || 'pasted-image.png');
+    });
+
+    const response = await authenticatedFetch('/api/image-path-attachments', {
+      method: 'POST',
+      body: formData,
+    });
+
+    const body = await response.json().catch(() => ({})) as SaveImagePathAttachmentsResponse;
+    if (!response.ok) {
+      throw new Error(body.error || body.message || IMAGE_PATH_SAVE_FAILED_MESSAGE);
+    }
+
+    if (!Array.isArray(body.attachments)) {
+      throw new Error(IMAGE_PATH_SAVE_FAILED_MESSAGE);
+    }
+
+    const savedAttachments: ImagePathAttachment[] = [];
+    body.attachments.forEach((attachment, index) => {
+      if (typeof attachment.path !== 'string' || !attachment.path.trim()) {
+        return;
+      }
+
+      savedAttachments.push({
+        id: createImageAttachmentId(),
+        name: typeof attachment.name === 'string' && attachment.name.trim()
+          ? attachment.name
+          : files[index]?.name || getPathFileName(attachment.path),
+        path: attachment.path.trim(),
+        file: files[index],
+      });
+    });
+
+    return savedAttachments;
+  }, []);
+
+  const handleImageFiles = useCallback(async (files: File[]) => {
+    const imageFiles = files.filter((file) => {
       try {
         if (!file || typeof file !== 'object') {
           console.warn('Invalid file object:', file);
           return false;
         }
 
-        if (!file.type || !file.type.startsWith('image/')) {
-          return false;
-        }
-
-        if (!file.size || file.size > 5 * 1024 * 1024) {
-          const fileName = file.name || 'Unknown file';
-          setImageErrors((previous) => {
-            const next = new Map(previous);
-            next.set(fileName, 'File too large (max 5MB)');
-            return next;
-          });
-          return false;
-        }
-
-        return true;
+        return isImageFile(file);
       } catch (error) {
         console.error('Error validating file:', error, file);
         return false;
       }
     });
 
-    if (validFiles.length > 0) {
-      setAttachedImages((previous) => [...previous, ...validFiles].slice(0, 5));
+    if (imageFiles.length === 0) {
+      return;
     }
-  }, []);
+
+    const localAttachments: ImagePathAttachment[] = [];
+    const filesToSave: File[] = [];
+
+    imageFiles.forEach((file) => {
+      const localPath = readLocalImagePath(file);
+      const attachment = localPath ? createImagePathAttachment(localPath, file) : null;
+
+      if (attachment) {
+        localAttachments.push(attachment);
+        return;
+      }
+
+      filesToSave.push(file);
+    });
+
+    appendImageAttachments(localAttachments);
+
+    if (filesToSave.length === 0) {
+      return;
+    }
+
+    try {
+      const savedAttachments = await saveImageFilesAsPathAttachments(filesToSave);
+      appendImageAttachments(savedAttachments);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : IMAGE_PATH_SAVE_FAILED_MESSAGE;
+      console.error('Image path attachment save failed:', error);
+      setImagePathError(message);
+    }
+  }, [appendImageAttachments, saveImageFilesAsPathAttachments]);
 
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>) => {
-      const items = Array.from(event.clipboardData.items);
+      const clipboardFiles = Array.from(event.clipboardData.files || []);
+      const imageFiles = clipboardFiles.filter(isImageFile);
+      if (imageFiles.length > 0) {
+        event.preventDefault();
+        void handleImageFiles(imageFiles);
+        return;
+      }
 
-      items.forEach((item) => {
-        if (!item.type.startsWith('image/')) {
-          return;
-        }
-        const file = item.getAsFile();
-        if (file) {
-          handleImageFiles([file]);
-        }
-      });
+      const imageItemFiles = Array.from(event.clipboardData.items)
+        .filter((item) => item.type.startsWith('image/'))
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => Boolean(file));
 
-      if (items.length === 0 && event.clipboardData.files.length > 0) {
-        const files = Array.from(event.clipboardData.files);
-        const imageFiles = files.filter((file) => file.type.startsWith('image/'));
-        if (imageFiles.length > 0) {
-          handleImageFiles(imageFiles);
-        }
+      if (imageItemFiles.length > 0) {
+        event.preventDefault();
+        void handleImageFiles(imageItemFiles);
       }
     },
     [handleImageFiles],
   );
 
-  const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
+  const openImagePathPicker = useCallback(async () => {
+    setImagePathError(null);
+
+    try {
+      const response = await authenticatedFetch('/api/file-picker/images', {
+        method: 'POST',
+      });
+
+      if (!response.ok) {
+        let errorMessage = `Failed to select image paths (${response.status})`;
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData?.error || errorData?.message || errorMessage;
+        } catch {
+          // Keep fallback error message.
+        }
+        throw new Error(errorMessage);
+      }
+
+      const body = await response.json();
+      const paths: string[] = Array.isArray(body?.paths)
+        ? body.paths.filter((path: unknown): path is string => typeof path === 'string' && path.trim().length > 0)
+        : [];
+      const pathAttachments: ImagePathAttachment[] = [];
+      paths.forEach((imagePath) => {
+        const attachment = createImagePathAttachment(imagePath);
+        if (attachment) {
+          pathAttachments.push(attachment);
+        }
+      });
+      appendImageAttachments(pathAttachments);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to select image paths';
+      console.error('Image path selection failed:', error);
+      setImagePathError(message);
+    }
+  }, [appendImageAttachments]);
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
     accept: {
-      'image/*': ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'],
+      'image/*': ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.tif', '.tiff'],
     },
-    maxSize: 5 * 1024 * 1024,
-    maxFiles: 5,
-    onDrop: handleImageFiles,
+    onDrop: (acceptedFiles) => {
+      void handleImageFiles(acceptedFiles);
+    },
     noClick: true,
     noKeyboard: true,
   });
@@ -533,7 +746,7 @@ export function useChatComposerState({
     ) => {
       event.preventDefault();
       const currentInput = inputValueRef.current;
-      if (!currentInput.trim() || isLoading || !selectedProject) {
+      if ((!currentInput.trim() && attachedImages.length === 0) || isLoading || !selectedProject) {
         return;
       }
 
@@ -563,6 +776,7 @@ export function useChatComposerState({
           setAttachedImages([]);
           setUploadingImages(new Map());
           setImageErrors(new Map());
+          setImagePathError(null);
           resetCommandMenuState();
           setIsTextareaExpanded(false);
           if (textareaRef.current) {
@@ -572,42 +786,10 @@ export function useChatComposerState({
         }
       }
 
-      const messageContent = currentInput;
-
-      let uploadedImages: unknown[] = [];
-      if (attachedImages.length > 0) {
-        const formData = new FormData();
-        attachedImages.forEach((file) => {
-          formData.append('images', file);
-        });
-
-        try {
-          const response = await authenticatedFetch(`/api/projects/${selectedProject.projectId}/upload-images`, {
-            method: 'POST',
-            headers: {},
-            body: formData,
-          });
-
-          if (!response.ok) {
-            throw new Error('Failed to upload images');
-          }
-
-          const result = await response.json();
-          uploadedImages = result.images;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown error';
-          console.error('Image upload failed:', error);
-          addMessage({
-            type: 'error',
-            content: `Failed to upload images: ${message}`,
-            timestamp: new Date(),
-          });
-          return;
-        }
-      }
+      const messageContent = buildMessageContentWithImagePaths(currentInput, attachedImages);
 
       const resolvedProjectPath = selectedProject.fullPath || selectedProject.path || '';
-      const sessionSummary = getNotificationSessionSummary(selectedSession, currentInput);
+      const sessionSummary = getNotificationSessionSummary(selectedSession, messageContent);
 
       // The conversation always has a stable backend-allocated session id
       // BEFORE the first websocket send: brand-new chats allocate one here
@@ -657,8 +839,7 @@ export function useChatComposerState({
 
       const userMessage: ChatMessage = {
         type: 'user',
-        content: currentInput,
-        images: uploadedImages as any,
+        content: messageContent,
         timestamp: new Date(),
       };
 
@@ -728,7 +909,6 @@ export function useChatComposerState({
           toolsSettings,
           skipPermissions: toolsSettings?.skipPermissions || false,
           sessionSummary,
-          images: uploadedImages,
         },
       });
 
@@ -738,6 +918,7 @@ export function useChatComposerState({
       setAttachedImages([]);
       setUploadingImages(new Map());
       setImageErrors(new Map());
+      setImagePathError(null);
       setIsTextareaExpanded(false);
 
       if (textareaRef.current) {
@@ -748,7 +929,6 @@ export function useChatComposerState({
     },
     [
       selectedSession,
-      attachedImages,
       claudeModel,
       codexModel,
       currentSessionId,
@@ -768,6 +948,7 @@ export function useChatComposerState({
       addMessage,
       setIsUserScrolledUp,
       slashCommands,
+      attachedImages,
     ],
   );
 
@@ -908,6 +1089,10 @@ export function useChatComposerState({
   const handleClearInput = useCallback(() => {
     setInput('');
     inputValueRef.current = '';
+    setAttachedImages([]);
+    setUploadingImages(new Map());
+    setImageErrors(new Map());
+    setImagePathError(null);
     resetCommandMenuState();
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
@@ -1008,10 +1193,11 @@ export function useChatComposerState({
     setAttachedImages,
     uploadingImages,
     imageErrors,
+    imagePathError,
     getRootProps,
     getInputProps,
     isDragActive,
-    openImagePicker: open,
+    openImagePicker: openImagePathPicker,
     handleSubmit,
     handleInputChange,
     handleKeyDown,

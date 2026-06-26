@@ -92,8 +92,92 @@ const RUNNING_VERSION = (() => {
 const MAX_FILE_UPLOAD_SIZE_MB = 200;
 const MAX_FILE_UPLOAD_SIZE_BYTES = MAX_FILE_UPLOAD_SIZE_MB * 1024 * 1024;
 const MAX_FILE_UPLOAD_COUNT = 20;
+const MAX_IMAGE_PATH_UPLOAD_SIZE_MB = 5;
+const MAX_IMAGE_PATH_UPLOAD_SIZE_BYTES = MAX_IMAGE_PATH_UPLOAD_SIZE_MB * 1024 * 1024;
+const MAX_IMAGE_PATH_UPLOAD_COUNT = 5;
+const IMAGE_PICKER_TIMEOUT_MS = 120000;
 
 console.log('SERVER_PORT from env:', process.env.SERVER_PORT);
+
+function pickImagePathsWithWindowsDialog() {
+    return new Promise((resolve, reject) => {
+        const script = [
+            'Add-Type -AssemblyName System.Windows.Forms',
+            '$dialog = New-Object System.Windows.Forms.OpenFileDialog',
+            "$dialog.Title = 'Select image files'",
+            "$dialog.Filter = 'Image files (*.png;*.jpg;*.jpeg;*.gif;*.webp;*.svg;*.bmp;*.tif;*.tiff)|*.png;*.jpg;*.jpeg;*.gif;*.webp;*.svg;*.bmp;*.tif;*.tiff|All files (*.*)|*.*'",
+            '$dialog.Multiselect = $true',
+            'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.FileNames | ForEach-Object { [Console]::Out.WriteLine($_) } }'
+        ].join('; ');
+
+        const child = spawn('powershell.exe', [
+            '-NoProfile',
+            '-STA',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-Command',
+            script
+        ], {
+            windowsHide: false
+        });
+
+        let stdout = '';
+        let stderr = '';
+        let settled = false;
+
+        const finish = (callback) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            clearTimeout(timeout);
+            callback();
+        };
+
+        const timeout = setTimeout(() => {
+            child.kill();
+            finish(() => reject(new Error('Image picker timed out.')));
+        }, IMAGE_PICKER_TIMEOUT_MS);
+
+        child.stdout.on('data', (chunk) => {
+            stdout += chunk.toString();
+        });
+        child.stderr.on('data', (chunk) => {
+            stderr += chunk.toString();
+        });
+        child.on('error', (error) => {
+            finish(() => reject(error));
+        });
+        child.on('close', (code) => {
+            finish(() => {
+                if (code !== 0) {
+                    reject(new Error(stderr.trim() || `Image picker exited with code ${code}.`));
+                    return;
+                }
+
+                const paths = stdout
+                    .split(/\r?\n/)
+                    .map((line) => line.trim())
+                    .filter(Boolean);
+                resolve(paths);
+            });
+        });
+    });
+}
+
+function createTempImageFileName(file) {
+    const originalName = path.basename(file.originalname || 'image');
+    const originalExt = path.extname(originalName);
+    const mimeExt = mime.extension(file.mimetype || '');
+    const extension = (originalExt || (mimeExt ? `.${mimeExt}` : '.png'))
+        .replace(/[^a-zA-Z0-9.]/g, '')
+        .slice(0, 12) || '.png';
+    const baseName = path.basename(originalName, originalExt)
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+        .slice(0, 80) || 'image';
+    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1E9)}`;
+    return `${uniqueSuffix}-${baseName}${extension}`;
+}
 
 function readUsageNumber(value) {
     const parsed = Number(value);
@@ -179,6 +263,117 @@ app.use('/api', validateApiKey);
 
 // Authentication routes (public)
 app.use('/api/auth', authRoutes);
+
+app.post('/api/file-picker/images', authenticateToken, async (_req, res) => {
+    if (process.platform !== 'win32') {
+        return res.status(501).json({
+            error: 'Image path picker is only supported on Windows local hosts.'
+        });
+    }
+
+    try {
+        const paths = await pickImagePathsWithWindowsDialog();
+        res.json({ paths });
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error('Error opening image picker:', message);
+        res.status(500).json({ error: message });
+    }
+});
+
+app.post('/api/image-path-attachments', authenticateToken, async (req, res) => {
+    try {
+        const multer = (await import('multer')).default;
+        const allowedMimes = new Set([
+            'image/jpeg',
+            'image/png',
+            'image/gif',
+            'image/webp',
+            'image/svg+xml',
+            'image/bmp',
+            'image/tiff'
+        ]);
+
+        const uploadDir = path.join(
+            os.tmpdir(),
+            'cloudcli-image-paths',
+            String(req.user?.id ?? 'default')
+        );
+
+        const storage = multer.diskStorage({
+            destination: async (_req, _file, cb) => {
+                try {
+                    await fsPromises.mkdir(uploadDir, { recursive: true });
+                    cb(null, uploadDir);
+                } catch (error) {
+                    cb(error);
+                }
+            },
+            filename: (_req, file, cb) => {
+                cb(null, createTempImageFileName(file));
+            }
+        });
+
+        const fileFilter = (_req, file, cb) => {
+            const hasImageMime = allowedMimes.has(file.mimetype);
+            const hasImageExtension = /\.(png|jpe?g|gif|webp|svg|bmp|tiff?)$/i.test(file.originalname || '');
+
+            if (hasImageMime || hasImageExtension) {
+                cb(null, true);
+                return;
+            }
+
+            cb(new Error('Invalid file type. Only image files are allowed.'));
+        };
+
+        const upload = multer({
+            storage,
+            fileFilter,
+            limits: {
+                fileSize: MAX_IMAGE_PATH_UPLOAD_SIZE_BYTES,
+                files: MAX_IMAGE_PATH_UPLOAD_COUNT
+            }
+        });
+
+        upload.array('images', MAX_IMAGE_PATH_UPLOAD_COUNT)(req, res, async (err) => {
+            if (err) {
+                if (req.files) {
+                    await Promise.all(req.files.map((file) => fsPromises.unlink(file.path).catch(() => {})));
+                }
+
+                if (err.code === 'LIMIT_FILE_SIZE') {
+                    return res.status(400).json({
+                        error: `Image is larger than ${MAX_IMAGE_PATH_UPLOAD_SIZE_MB}MB.`
+                    });
+                }
+                if (err.code === 'LIMIT_FILE_COUNT') {
+                    return res.status(400).json({
+                        error: `Too many images. Maximum is ${MAX_IMAGE_PATH_UPLOAD_COUNT}.`
+                    });
+                }
+
+                return res.status(400).json({ error: err.message || 'Unable to save image file.' });
+            }
+
+            if (!req.files || req.files.length === 0) {
+                return res.status(400).json({ error: 'No image files provided.' });
+            }
+
+            const attachments = req.files.map((file) => ({
+                name: file.originalname || path.basename(file.path),
+                path: file.path,
+                size: file.size,
+                mimeType: file.mimetype
+            }));
+
+            res.json({ attachments });
+        });
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error('Error saving image path attachments:', message);
+        res.status(500).json({ error: message });
+    }
+});
 
 // Projects API Routes (protected)
 app.use('/api/projects', authenticateToken, projectModuleRoutes);

@@ -324,6 +324,33 @@ const parseSessionRenameSummary = (payload: unknown): string => {
   return summary;
 };
 
+const parseRewindPayload = (payload: unknown): string => {
+  if (!payload || typeof payload !== 'object') {
+    throw new AppError('Request body must be an object.', {
+      code: 'INVALID_REQUEST_BODY',
+      statusCode: 400,
+    });
+  }
+
+  const body = payload as Record<string, unknown>;
+  const messageId = typeof body.messageId === 'string' ? body.messageId.trim() : '';
+  if (!messageId) {
+    throw new AppError('messageId is required.', {
+      code: 'MESSAGE_ID_REQUIRED',
+      statusCode: 400,
+    });
+  }
+
+  if (messageId.length > 240) {
+    throw new AppError('messageId is too long.', {
+      code: 'INVALID_MESSAGE_ID',
+      statusCode: 400,
+    });
+  }
+
+  return messageId;
+};
+
 const parseSessionSearchQuery = (value: unknown): string => {
   const query = readOptionalQueryString(value) ?? '';
   if (query.length < 2) {
@@ -575,6 +602,16 @@ router.put(
     const sessionId = parseSessionId(req.params.sessionId);
     const summary = parseSessionRenameSummary(req.body);
     const result = sessionsService.renameSessionById(sessionId, summary);
+    res.json(createApiSuccessResponse(result));
+  }),
+);
+
+router.post(
+  '/sessions/:sessionId/rewind',
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = parseSessionId(req.params.sessionId);
+    const messageId = parseRewindPayload(req.body);
+    const result = await sessionsService.rewindSession(sessionId, messageId);
     res.json(createApiSuccessResponse(result));
   }),
 );

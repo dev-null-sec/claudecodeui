@@ -282,6 +282,12 @@ export type FetchHistoryOptions = {
   providerSessionId?: string;
 };
 
+export type RewindHistoryOptions = {
+  projectPath?: string;
+  providerSessionId?: string;
+  messageId: string;
+};
+
 /**
  * Standardized response payload returned from provider history readers.
  *
@@ -294,6 +300,19 @@ export type FetchHistoryResult = {
   offset: number;
   limit: number | null;
   tokenUsage?: unknown;
+};
+
+export type RewindSessionResult = {
+  sessionId: string;
+  provider: LLMProvider;
+  messageId: string;
+  removedLines: number;
+  backupPath: string | null;
+  messages: NormalizedMessage[];
+  total: number;
+  hasMore: boolean;
+  offset: number;
+  limit: number | null;
 };
 
 // ---------------------------

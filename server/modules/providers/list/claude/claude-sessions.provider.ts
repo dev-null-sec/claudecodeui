@@ -4,8 +4,15 @@ import path from 'node:path';
 import readline from 'node:readline';
 
 import type { IProviderSessions } from '@/shared/interfaces.js';
-import type { AnyRecord, FetchHistoryOptions, FetchHistoryResult, NormalizedMessage } from '@/shared/types.js';
-import { createNormalizedMessage, generateMessageId, readObjectRecord, sliceTailPage } from '@/shared/utils.js';
+import type {
+  AnyRecord,
+  FetchHistoryOptions,
+  FetchHistoryResult,
+  NormalizedMessage,
+  RewindHistoryOptions,
+  RewindSessionResult,
+} from '@/shared/types.js';
+import { AppError, createNormalizedMessage, generateMessageId, readObjectRecord, sliceTailPage } from '@/shared/utils.js';
 import { sessionsDb } from '@/modules/database/index.js';
 
 const PROVIDER = 'claude';
@@ -34,6 +41,11 @@ type ClaudeHistoryMessagesResult =
     offset?: number;
     limit?: number | null;
   };
+
+type ClaudeJsonlLine = {
+  line: string;
+  parsed: AnyRecord | null;
+};
 
 async function parseAgentTools(filePath: string): Promise<AnyRecord[]> {
   const tools: AnyRecord[] = [];
@@ -200,6 +212,32 @@ async function getSessionMessages(
     console.error(`Error reading messages for session ${sessionId}:`, error);
     return limit === null ? [] : { messages: [], total: 0, hasMore: false };
   }
+}
+
+async function readClaudeJsonlLines(filePath: string): Promise<ClaudeJsonlLine[]> {
+  const text = await fsp.readFile(filePath, 'utf8');
+  return text
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0)
+    .map((line) => {
+      try {
+        return { line, parsed: JSON.parse(line) as AnyRecord };
+      } catch {
+        return { line, parsed: null };
+      }
+    });
+}
+
+function createRewindBackupPath(filePath: string): string {
+  const stamp = new Date()
+    .toISOString()
+    .replace(/[:.]/g, '-');
+  return `${filePath}.rewind-${stamp}.bak`;
+}
+
+async function writeClaudeJsonlLines(filePath: string, lines: ClaudeJsonlLine[]): Promise<void> {
+  const content = lines.length > 0 ? `${lines.map((entry) => entry.line).join('\n')}\n` : '';
+  await fsp.writeFile(filePath, content, 'utf8');
 }
 
 /**
@@ -626,6 +664,97 @@ export class ClaudeSessionsProvider implements IProviderSessions {
       hasMore,
       offset: normalizedOffset,
       limit: normalizedLimit,
+    };
+  }
+
+  /**
+   * Rewinds a Claude JSONL transcript to the raw row that produced `messageId`.
+   *
+   * The target row is kept. Later rows for the same provider-native session are
+   * removed, while unrelated session rows in the same file are preserved.
+   */
+  async rewindHistory(
+    sessionId: string,
+    options: RewindHistoryOptions,
+  ): Promise<RewindSessionResult> {
+    const messageId = options.messageId.trim();
+    if (!messageId) {
+      throw new AppError('messageId is required.', {
+        code: 'MESSAGE_ID_REQUIRED',
+        statusCode: 400,
+      });
+    }
+
+    const providerSessionId = options.providerSessionId ?? sessionId;
+    const jsonlPath = sessionsDb.getSessionById(sessionId)?.jsonl_path;
+    if (!jsonlPath) {
+      throw new AppError('Session transcript was not found.', {
+        code: 'SESSION_TRANSCRIPT_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+
+    const lines = await readClaudeJsonlLines(jsonlPath);
+    let targetIndex = -1;
+
+    for (let index = 0; index < lines.length; index++) {
+      const raw = lines[index].parsed;
+      if (!raw || raw.sessionId !== providerSessionId) {
+        continue;
+      }
+
+      const normalized = this.normalizeMessage(raw, sessionId);
+      if (normalized.some((message) => message.id === messageId)) {
+        targetIndex = index;
+        break;
+      }
+    }
+
+    if (targetIndex < 0) {
+      throw new AppError('The selected message is no longer available in this session history.', {
+        code: 'MESSAGE_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+
+    const keptLines: ClaudeJsonlLine[] = [];
+    let removedLines = 0;
+    for (let index = 0; index < lines.length; index++) {
+      const entry = lines[index];
+      const isLaterTargetSessionLine =
+        index > targetIndex
+        && entry.parsed?.sessionId === providerSessionId;
+
+      if (isLaterTargetSessionLine) {
+        removedLines += 1;
+        continue;
+      }
+
+      keptLines.push(entry);
+    }
+
+    let backupPath: string | null = null;
+    if (removedLines > 0) {
+      backupPath = createRewindBackupPath(jsonlPath);
+      await fsp.copyFile(jsonlPath, backupPath);
+      await writeClaudeJsonlLines(jsonlPath, keptLines);
+      sessionsDb.touchSession(sessionId);
+    }
+
+    const history = await this.fetchHistory(sessionId, {
+      projectPath: options.projectPath,
+      providerSessionId,
+      limit: null,
+      offset: 0,
+    });
+
+    return {
+      sessionId,
+      provider: PROVIDER,
+      messageId,
+      removedLines,
+      backupPath,
+      ...history,
     };
   }
 }

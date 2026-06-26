@@ -59,6 +59,8 @@ interface ChatMessagesPaneProps {
   onFileOpen?: (filePath: string, diffInfo?: unknown) => void;
   onShowSettings?: () => void;
   onGrantToolPermission: (suggestion: { entry: string; toolName: string }) => { success: boolean };
+  onRewindToMessage?: (message: ChatMessage) => void;
+  rewindingMessageId?: string | null;
   autoExpandTools?: boolean;
   showRawParameters?: boolean;
   showThinking?: boolean;
@@ -109,6 +111,8 @@ export default function ChatMessagesPane({
   onFileOpen,
   onShowSettings,
   onGrantToolPermission,
+  onRewindToMessage,
+  rewindingMessageId,
   autoExpandTools,
   showRawParameters,
   showThinking,
@@ -263,6 +267,8 @@ export default function ChatMessagesPane({
                 onFileOpen={onFileOpen}
                 onShowSettings={onShowSettings}
                 onGrantToolPermission={onGrantToolPermission}
+                onRewindToMessage={onRewindToMessage}
+                isRewinding={Boolean(message.id && rewindingMessageId === message.id)}
                 autoExpandTools={autoExpandTools}
                 showRawParameters={showRawParameters}
                 showThinking={showThinking}

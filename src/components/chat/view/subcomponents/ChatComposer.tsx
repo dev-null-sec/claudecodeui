@@ -12,7 +12,7 @@ import type {
 import { ImageIcon, MessageSquareIcon, XIcon, ArrowDownIcon } from 'lucide-react';
 
 import type { SessionActivity } from '../../../../hooks/useSessionProtection';
-import type { PendingPermissionRequest, PermissionMode } from '../../types/types';
+import type { ImagePathAttachment, PendingPermissionRequest, PermissionMode } from '../../types/types';
 import {
   PromptInput,
   PromptInputHeader,
@@ -68,10 +68,11 @@ interface ChatComposerProps {
   onScrollToBottom: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement> | MouseEvent<HTMLButtonElement> | TouchEvent<HTMLButtonElement>) => void;
   isDragActive: boolean;
-  attachedImages: File[];
+  attachedImages: ImagePathAttachment[];
   onRemoveImage: (index: number) => void;
   uploadingImages: Map<string, number>;
   imageErrors: Map<string, string>;
+  imagePathError?: string | null;
   showFileDropdown: boolean;
   filteredFiles: MentionableFile[];
   selectedFileIndex: number;
@@ -125,6 +126,7 @@ export default function ChatComposer({
   onRemoveImage,
   uploadingImages,
   imageErrors,
+  imagePathError,
   showFileDropdown,
   filteredFiles,
   selectedFileIndex,
@@ -242,8 +244,8 @@ export default function ChatComposer({
           {...getRootProps()}
         >
           {isDragActive && (
-            <div className="absolute inset-0 z-50 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary/50 bg-primary/15">
-              <div className="rounded-xl border border-border/30 bg-card p-4 shadow-lg">
+            <div className="absolute inset-0 z-50 flex items-center justify-center rounded-xl border-2 border-dashed border-primary/50 bg-primary/15">
+              <div className="rounded-lg border border-border/30 bg-card px-4 py-3 shadow-sm">
                 <svg className="mx-auto mb-2 h-8 w-8 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path
                     strokeLinecap="round"
@@ -252,7 +254,9 @@ export default function ChatComposer({
                     d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
                   />
                 </svg>
-                <p className="text-sm font-medium">Drop images here</p>
+                <p className="text-sm font-medium">
+                  {t('input.dropImagesForPaths', { defaultValue: 'Drop images to insert paths' })}
+                </p>
               </div>
             </div>
           )}
@@ -261,13 +265,13 @@ export default function ChatComposer({
             <PromptInputHeader>
               <div className="rounded-xl bg-muted/40 p-2">
                 <div className="flex flex-wrap gap-2">
-                  {attachedImages.map((file, index) => (
+                  {attachedImages.map((attachment, index) => (
                     <ImageAttachment
-                      key={index}
-                      file={file}
+                      key={attachment.id}
+                      attachment={attachment}
                       onRemove={() => onRemoveImage(index)}
-                      uploadProgress={uploadingImages.get(file.name)}
-                      error={imageErrors.get(file.name)}
+                      uploadProgress={uploadingImages.get(attachment.id)}
+                      error={imageErrors.get(attachment.id)}
                     />
                   ))}
                 </div>
@@ -303,7 +307,7 @@ export default function ChatComposer({
         <PromptInputFooter>
           <PromptInputTools>
             <PromptInputButton
-              tooltip={{ content: t('input.attachImages') }}
+              tooltip={{ content: t('input.insertImagePath', { defaultValue: 'Insert image path' }) }}
               onClick={openImagePicker}
             >
               <ImageIcon />
@@ -381,19 +385,24 @@ export default function ChatComposer({
           <div className="flex items-center gap-2">
             <div
               className={`hidden text-xs text-muted-foreground/50 transition-opacity duration-200 lg:block ${
-                input.trim() ? 'opacity-0' : 'opacity-100'
+                hasInput ? 'opacity-0' : 'opacity-100'
               }`}
             >
               {sendByCtrlEnter ? t('input.hintText.ctrlEnter') : t('input.hintText.enter')}
             </div>
             <PromptInputSubmit
               onClick={isLoading ? onAbortSession : undefined}
-              disabled={!isLoading && !input.trim()}
+              disabled={!isLoading && !hasInput}
               className="h-10 w-10 sm:h-10 sm:w-10"
             />
           </div>
         </PromptInputFooter>
       </PromptInput>
+        {imagePathError && (
+          <div className="mt-2 text-xs leading-5 text-destructive">
+            {imagePathError}
+          </div>
+        )}
       </div>}
     </div>
   );

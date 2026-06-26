@@ -10,6 +10,7 @@ import type {
   FetchHistoryResult,
   LLMProvider,
   NormalizedMessage,
+  RewindSessionResult,
 } from '@/shared/types.js';
 import { AppError } from '@/shared/utils.js';
 
@@ -182,6 +183,55 @@ export const sessionsService = {
 
     return {
       ...result,
+      messages: result.messages.map((message) => ({
+        ...message,
+        sessionId,
+      })),
+    };
+  },
+
+  async rewindSession(sessionId: string, messageId: string): Promise<RewindSessionResult> {
+    const session = sessionsDb.getSessionById(sessionId);
+    if (!session) {
+      throw new AppError(`Session "${sessionId}" was not found.`, {
+        code: 'SESSION_NOT_FOUND',
+        statusCode: 404,
+      });
+    }
+
+    if (chatRunRegistry.isProcessing(sessionId)) {
+      throw new AppError('Cannot rewind a session while it is running.', {
+        code: 'SESSION_RUNNING',
+        statusCode: 409,
+      });
+    }
+
+    if (!session.provider_session_id) {
+      throw new AppError('Session has no provider history yet.', {
+        code: 'SESSION_HISTORY_NOT_READY',
+        statusCode: 409,
+      });
+    }
+
+    const provider = session.provider as LLMProvider;
+    const adapter = providerRegistry.resolveProvider(provider).sessions;
+    if (!adapter.rewindHistory) {
+      throw new AppError(`Provider "${provider}" does not support conversation rewind.`, {
+        code: 'REWIND_UNSUPPORTED_PROVIDER',
+        statusCode: 400,
+      });
+    }
+
+    const result = await adapter.rewindHistory(sessionId, {
+      messageId,
+      projectPath: session.project_path ?? '',
+      providerSessionId: session.provider_session_id,
+    });
+
+    return {
+      ...result,
+      sessionId,
+      provider,
       messages: result.messages.map((message) => ({
         ...message,
         sessionId,

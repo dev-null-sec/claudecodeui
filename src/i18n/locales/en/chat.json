@@ -11,6 +11,9 @@
     "copyAsMarkdown": "Copy as markdown",
     "copyAsText": "Copy as text"
   },
+  "rewind": {
+    "toHere": "Rewind conversation to here"
+  },
   "messageTypes": {
     "user": "U",
     "error": "Error",
@@ -128,6 +131,8 @@
     "disabled": "Input disabled",
     "attachFiles": "Attach files",
     "attachImages": "Attach images",
+    "insertImagePath": "Insert image path",
+    "dropImagesForPaths": "Drop images to insert paths",
     "send": "Send",
     "stop": "Stop",
     "hintText": {

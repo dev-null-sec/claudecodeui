@@ -1,16 +1,17 @@
-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useTasksSettings } from '../../../contexts/TasksSettingsContext';
 import { useWebSocket } from '../../../contexts/WebSocketContext';
 import PermissionContext from '../../../contexts/PermissionContext';
 import { QuickSettingsPanel } from '../../quick-settings-panel';
-import type { ChatInterfaceProps, Provider  } from '../types/types';
+import type { ChatInterfaceProps, ChatMessage, Provider } from '../types/types';
 import { useChatProviderState } from '../hooks/useChatProviderState';
 import { useChatSessionState } from '../hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '../hooks/useChatRealtimeHandlers';
 import { useChatComposerState } from '../hooks/useChatComposerState';
 import { useSessionStore } from '../../../stores/useSessionStore';
+import { authenticatedFetch } from '../../../utils/api';
 
 import ChatMessagesPane from './subcomponents/ChatMessagesPane';
 import ChatComposer from './subcomponents/ChatComposer';
@@ -44,6 +45,7 @@ function ChatInterface({
   const { t } = useTranslation('chat');
 
   const sessionStore = useSessionStore();
+  const [rewindingMessageId, setRewindingMessageId] = useState<string | null>(null);
   const streamTimerRef = useRef<number | null>(null);
   const accumulatedStreamRef = useRef('');
   // When each session's `chat.subscribe` was last sent; idle acks older than
@@ -144,6 +146,57 @@ function ChatInterface({
     onNavigateToSession?.(sessionId);
   }, [setCurrentSessionId, onSessionEstablished, onNavigateToSession]);
 
+  const handleRewindToMessage = useCallback(async (message: ChatMessage) => {
+    const sessionId = selectedSession?.id || currentSessionId;
+    const messageId = typeof message.id === 'string' ? message.id : '';
+    if (!sessionId || !messageId || rewindingMessageId) {
+      return;
+    }
+
+    setRewindingMessageId(messageId);
+    try {
+      const response = await authenticatedFetch(`/api/providers/sessions/${encodeURIComponent(sessionId)}/rewind`, {
+        method: 'POST',
+        body: JSON.stringify({ messageId }),
+      });
+
+      const body = await response.json().catch(() => null);
+      if (!response.ok) {
+        const errorMessage = body?.error || body?.message || `Failed to rewind conversation (${response.status})`;
+        throw new Error(errorMessage);
+      }
+
+      const data = body?.data ?? body;
+      sessionStore.replaceServerMessages(sessionId, data.messages || [], {
+        total: data.total,
+        hasMore: data.hasMore,
+        offset: data.offset,
+        tokenUsage: data.tokenUsage,
+      });
+      resetStreamingState();
+      window.requestAnimationFrame(() => {
+        scrollToBottomAndReset();
+      });
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : 'Failed to rewind conversation.';
+      addMessage({
+        type: 'error',
+        content: messageText,
+        timestamp: new Date(),
+      });
+    } finally {
+      setRewindingMessageId(null);
+    }
+  }, [
+    addMessage,
+    currentSessionId,
+    resetStreamingState,
+    rewindingMessageId,
+    scrollToBottomAndReset,
+    selectedSession?.id,
+    sessionStore,
+  ]);
+
   const {
     input,
     setInput,
@@ -168,6 +221,7 @@ function ChatInterface({
     setAttachedImages,
     uploadingImages,
     imageErrors,
+    imagePathError,
     getRootProps,
     getInputProps,
     isDragActive,
@@ -355,6 +409,8 @@ function ChatInterface({
           onFileOpen={onFileOpen}
           onShowSettings={onShowSettings}
           onGrantToolPermission={handleGrantToolPermission}
+          onRewindToMessage={handleRewindToMessage}
+          rewindingMessageId={rewindingMessageId}
           autoExpandTools={autoExpandTools}
           showRawParameters={showRawParameters}
           showThinking={showThinking}
@@ -374,7 +430,7 @@ function ChatInterface({
           onShowTokenUsage={showCostModal}
           slashCommandsCount={slashCommandsCount}
           onToggleCommandMenu={handleToggleCommandMenu}
-          hasInput={Boolean(input.trim())}
+          hasInput={Boolean(input.trim()) || attachedImages.length > 0}
           onClearInput={handleClearInput}
           isUserScrolledUp={isUserScrolledUp}
           hasMessages={chatMessages.length > 0}
@@ -389,6 +445,7 @@ function ChatInterface({
           }
           uploadingImages={uploadingImages}
           imageErrors={imageErrors}
+          imagePathError={imagePathError}
           showFileDropdown={showFileDropdown}
           filteredFiles={filteredFiles}
           selectedFileIndex={selectedFileIndex}

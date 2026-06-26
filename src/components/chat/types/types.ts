@@ -14,6 +14,13 @@ export interface ChatImage {
   name: string;
 }
 
+export interface ImagePathAttachment {
+  id: string;
+  name: string;
+  path: string;
+  file?: File;
+}
+
 export interface ToolResult {
   content?: unknown;
   isError?: boolean;
@@ -31,6 +38,7 @@ export interface SubagentChildTool {
 }
 
 export interface ChatMessage {
+  id?: string;
   type: string;
   content?: string;
   displayText?: string;

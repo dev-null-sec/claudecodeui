@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Loader2, RotateCcw } from 'lucide-react';
 
 import SessionProviderLogo from '../../../llm-logo-provider/SessionProviderLogo';
 import type {
@@ -29,6 +30,8 @@ type MessageComponentProps = {
   onFileOpen?: (filePath: string, diffInfo?: unknown) => void;
   onShowSettings?: () => void;
   onGrantToolPermission?: (suggestion: ClaudePermissionSuggestion) => PermissionGrantResult | null | undefined;
+  onRewindToMessage?: (message: ChatMessage) => void;
+  isRewinding?: boolean;
   autoExpandTools?: boolean;
   showRawParameters?: boolean;
   showThinking?: boolean;
@@ -44,7 +47,19 @@ type InteractiveOption = {
 
 const COPY_HIDDEN_TOOL_NAMES = new Set(['Bash', 'Edit', 'Write', 'ApplyPatch']);
 
-const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, autoExpandTools, showRawParameters, showThinking, selectedProject, provider }: MessageComponentProps) => {
+const MessageComponent = memo(({
+  message,
+  prevMessage,
+  createDiff,
+  onFileOpen,
+  onRewindToMessage,
+  isRewinding,
+  autoExpandTools,
+  showRawParameters,
+  showThinking,
+  selectedProject,
+  provider,
+}: MessageComponentProps) => {
   const { t } = useTranslation('chat');
   const isGrouped = prevMessage && prevMessage.type === message.type &&
     ((prevMessage.type === 'assistant') ||
@@ -69,6 +84,27 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
     assistantCopyContent.trim().length > 0 &&
     !isCommandOrFileEditToolResponse &&
     !message.isThinking;
+  const messageId = typeof message.id === 'string' ? message.id : '';
+  const hasPersistedMessageId = Boolean(
+    messageId
+    && !messageId.startsWith('local_')
+    && !messageId.startsWith('__streaming_')
+    && !messageId.startsWith('text_'),
+  );
+  const canRewindToMessage = Boolean(
+    hasPersistedMessageId
+    && onRewindToMessage
+    && provider === 'claude'
+    && (message.type === 'user' || message.type === 'assistant')
+    && !message.isToolUse
+    && !message.isThinking
+    && !message.isInteractivePrompt
+    && !message.isStreaming
+    && !message.isTaskNotification
+    && !message.toolId
+    && !message.toolResult,
+  );
+  const rewindTitle = t('rewind.toHere', { defaultValue: 'Rewind conversation to here' });
 
 
   useEffect(() => {
@@ -108,7 +144,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
     <div
       ref={messageRef}
       data-message-timestamp={message.timestamp || undefined}
-      className={`chat-message ${message.type} ${isGrouped ? 'grouped' : ''} ${message.type === 'user' ? 'flex justify-end px-3 sm:px-0' : 'px-3 sm:px-0'}`}
+      className={`chat-message group ${message.type} ${isGrouped ? 'grouped' : ''} ${message.type === 'user' ? 'flex justify-end px-3 sm:px-0' : 'px-3 sm:px-0'}`}
     >
       {message.type === 'user' ? (
         /* User message bubble on the right */
@@ -133,6 +169,22 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
             <div className="mt-1 flex items-center justify-end gap-1 text-xs text-blue-100">
               {shouldShowUserCopyControl && (
                 <MessageCopyControl content={userCopyContent} messageType="user" />
+              )}
+              {canRewindToMessage && (
+                <button
+                  type="button"
+                  onClick={() => onRewindToMessage?.(message)}
+                  disabled={isRewinding}
+                  className="rounded p-0.5 text-blue-100 opacity-0 transition-opacity hover:bg-white/10 hover:text-white disabled:cursor-wait disabled:opacity-60 group-hover:opacity-100 focus:opacity-100"
+                  title={rewindTitle}
+                  aria-label={rewindTitle}
+                >
+                  {isRewinding ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  )}
+                </button>
               )}
               <span>{formattedTime}</span>
             </div>
@@ -410,10 +462,26 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, a
               </div>
             )}
 
-            {(shouldShowAssistantCopyControl || !isGrouped) && (
+            {(shouldShowAssistantCopyControl || canRewindToMessage || !isGrouped) && (
               <div className="mt-1 flex w-full items-center gap-2 text-[11px] text-gray-400 dark:text-gray-500">
                 {shouldShowAssistantCopyControl && (
                   <MessageCopyControl content={assistantCopyContent} messageType="assistant" />
+                )}
+                {canRewindToMessage && (
+                  <button
+                    type="button"
+                    onClick={() => onRewindToMessage?.(message)}
+                    disabled={isRewinding}
+                    className="rounded p-0.5 opacity-0 transition-opacity hover:bg-muted hover:text-foreground disabled:cursor-wait disabled:opacity-60 group-hover:opacity-100 focus:opacity-100"
+                    title={rewindTitle}
+                    aria-label={rewindTitle}
+                  >
+                    {isRewinding ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <RotateCcw className="h-3.5 w-3.5" />
+                    )}
+                  </button>
                 )}
                 {!isGrouped && <span>{formattedTime}</span>}
               </div>
